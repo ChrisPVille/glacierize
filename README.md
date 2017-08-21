@@ -24,7 +24,7 @@ make manifest file with UUIDish name (save first line for amazon archive ID)
 make targz with files in it  
 put file names/paths in manifest file  
 encrypt archive (how?)  
-upload archive with description set to the UUID name of manifest file
+upload archive with description set to the UUID name of manifest file  
 once upload is complete, put amazon ID into the first line of the manifest  
 return
 
