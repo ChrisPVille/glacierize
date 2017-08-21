@@ -4,7 +4,7 @@ Python based incremental file backup using large archives for minimal cost AWS G
 ## Overview
 This software is based on the concept of glacier as an archival backup-of-the-backups, useful for a disaster recovery scenario if the on-site backups were to be destroyed.
 
-Because the most likely scenario is a complete restoration of all the data at once, I deal with files in large globs (say 1-3GB).  This strikes a balance between a the archive size (money in undesirable unrelated bandwidth) and the number of archives (money in per-request costs), leaning heavily towards reducing the archive count.  The archives are still small enough to still allow a limited restoration should some unusual selective loss of data occur.
+Because the most likely scenario is a complete restoration of all the data at once, I deal with files in large globs (say 1-3GB).  This strikes a balance between the number of archives (money in per-request costs) and the archive size (money in unrelated bandwidth), leaning heavily towards reducing the archive count.  The archives are still small enough to allow a limited restoration should some unusual selective loss of data occur.
 
 ### Full Backup
 `WIP`
