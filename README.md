@@ -1,3 +1,5 @@
+`~~~~THIS IS A WORK IN PROGRESS~~~~ please don't use it for anything important yet`
+
 # glacierize
 Python based incremental file backup using large archives for minimal cost AWS Glacier storage
 
