@@ -1,4 +1,5 @@
-`~~~~THIS IS A WORK IN PROGRESS~~~~ please don't use it for anything important yet`
+`~~~~THIS IS A WORK IN PROGRESS~~~~ please don't use it for anything important yet.`
+`This could do anything up to and including erasing all your favorite bits.`
 
 # glacierize
 Python based incremental file backup using large archives for minimal cost AWS Glacier storage
