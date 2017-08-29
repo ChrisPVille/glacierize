@@ -374,7 +374,7 @@ USAGE
         parser.add_argument('-t', dest='tempdir', metavar='path', nargs='?', help='Temporary directory for the archive files')
         parser.add_argument('-m', dest='manifestdir', metavar='path', required=True, help='Directory for the manifest files. Any manifests already present will be compared against, allow for incremental backup.')
         parser.add_argument('-n', dest='vaultname', metavar='vault', required=True, help='Name of destination glacier vault')
-        parser.add_argument('-h', dest='hash', help='Use MD5Sum to determine if two files with same name/size are different, MTime is used otherwise')
+        parser.add_argument('-s', dest='hash', metavar='', help='Use MD5Sum to determine if two files with same name/size are different, MTime is used otherwise')
         parser.add_argument('-V', '--version', action='version', version=program_version_message)
         parser.add_argument(dest="paths", help="paths to folder(s) to recursively backup [default: %(default)s]", metavar="path", nargs='+')
 
