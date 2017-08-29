@@ -216,7 +216,7 @@ def createArchive(archiveDstDir,manifestDir,fileList,printQueue,uploadQueues,arc
             sleep(0.1)
                             
 
-def archiveFolderRecursive(paths,workingDir,manifestDir,vaultName,archivePassword):
+def archiveFolderRecursive(paths,workingDir,manifestDir,vaultName,archivePassword,hashTiebreaker):
     bigSetOFiles = set()
     totalSize = 0
     with tqdm(desc='Enumerating files', unit='f', dynamic_ncols=True) as fbar:
@@ -253,11 +253,16 @@ def archiveFolderRecursive(paths,workingDir,manifestDir,vaultName,archivePasswor
                             ebar.update(1)
                             #Is it the same size?
                             if os.path.getsize(row[0]) == int(row[1]):
-                                #Same hash?
-                                if str(md5OfFile(row[0])) == row[3]:
-                                    #If so, don't backup the file
-                                    setOfItemsToRemove.add(row[0])
-                                    sizeToRemoveFromTotal += os.path.getsize(row[0])
+                                if hashTiebreaker == True:
+                                    if str(md5OfFile(row[0])) == row[3]:
+                                        #Same hash?
+                                        setOfItemsToRemove.add(row[0])
+                                        sizeToRemoveFromTotal += os.path.getsize(row[0])
+                                else:
+                                    if str(os.path.getmtime(row[0])) == row[2]:
+                                        #Same M-time?
+                                        setOfItemsToRemove.add(row[0])
+                                        sizeToRemoveFromTotal += os.path.getsize(row[0])
                     if validManifest == False:
                         print('\nManifest %s is invalid' % os.path.basename(manifestFilePath))
     
@@ -369,6 +374,7 @@ USAGE
         parser.add_argument('-t', dest='tempdir', metavar='path', nargs='?', help='Temporary directory for the archive files')
         parser.add_argument('-m', dest='manifestdir', metavar='path', required=True, help='Directory for the manifest files. Any manifests already present will be compared against, allow for incremental backup.')
         parser.add_argument('-n', dest='vaultname', metavar='vault', required=True, help='Name of destination glacier vault')
+        parser.add_argument('-h', dest='hash', help='Use MD5Sum to determine if two files with same name/size are different, MTime is used otherwise')
         parser.add_argument('-V', '--version', action='version', version=program_version_message)
         parser.add_argument(dest="paths", help="paths to folder(s) to recursively backup [default: %(default)s]", metavar="path", nargs='+')
 
@@ -380,6 +386,11 @@ USAGE
         manifestDir = args.manifestdir
         vaultName = args.vaultname
         
+        if args.hash == None:
+            doMD5 = False
+        else:
+            doMD5 = True
+
         if tempDir == None:
             tempDir = mkdtemp()
         
@@ -400,7 +411,8 @@ USAGE
                                workingDir=tempDir,
                                manifestDir=manifestDir,
                                vaultName=vaultName,
-                               archivePassword=pw1
+                               archivePassword=pw1,
+                               hashTiebreaker=doMD5
                                )
         print('\nAll Operations Complete')
             
