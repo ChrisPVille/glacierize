@@ -221,10 +221,11 @@ def archiveFolderRecursive(paths,workingDir,manifestDir,vaultName,archivePasswor
         for path in paths:
             for root, dirs, files in os.walk(path, topdown=False):
                 for file in files:
-                    fullpath = os.path.abspath(os.path.join(root, file))
-                    totalSize += os.path.getsize(fullpath)
-                    bigSetOFiles.add(fullpath)
-                    fbar.update(1)
+                    if os.path.islink(file) == False:
+                        fullpath = os.path.abspath(os.path.join(root, file))
+                        totalSize += os.path.getsize(fullpath)
+                        bigSetOFiles.add(fullpath)
+                        fbar.update(1)
     
 
     with tqdm(desc='Evaluating manifest entries', unit='f', dynamic_ncols=True, position=0) as ebar:
@@ -281,33 +282,34 @@ def archiveFolderRecursive(paths,workingDir,manifestDir,vaultName,archivePasswor
     for path in paths:
         for root, dirs, files in os.walk(path, topdown=False):
             for file in files:
-                file = os.path.abspath(os.path.join(root, file))
-                #We could just operate on the bigSetOFiles, but we lose the ordering
-                #so as a compromise, we just skip ones not in the set
-                if file in bigSetOFiles:                    
-                    #If the current file is larger than the standard archive size, make one just for it
-                    if os.path.getsize(file) > maximumArchiveSize:
-                        createArchive(archiveDstDir=workingDir,
-                                      manifestDir=manifestDir,
-                                      fileList=[file],
-                                      printQueue=printQueue,
-                                      uploadQueues=uploadQueues,
-                                      archivePassword=archivePassword
-                                      )
-                    else: #Otherwise, add it to the list
-                        currentFileList.append(file)
-                        currentArchiveSize = currentArchiveSize + os.path.getsize(file)
-                        #If the list is now larger than the standard archive size, pack it up
-                        if currentArchiveSize > maximumArchiveSize:
+                if os.path.islink(file) == False:
+                    file = os.path.abspath(os.path.join(root, file))
+                    #We could just operate on the bigSetOFiles, but we lose the ordering
+                    #so as a compromise, we just skip ones not in the set
+                    if file in bigSetOFiles:                    
+                        #If the current file is larger than the standard archive size, make one just for it
+                        if os.path.getsize(file) > maximumArchiveSize:
                             createArchive(archiveDstDir=workingDir,
                                           manifestDir=manifestDir,
-                                          fileList=currentFileList,
+                                          fileList=[file],
                                           printQueue=printQueue,
                                           uploadQueues=uploadQueues,
                                           archivePassword=archivePassword
                                           )
-                            currentFileList.clear()
-                            currentArchiveSize = 0
+                        else: #Otherwise, add it to the list
+                            currentFileList.append(file)
+                            currentArchiveSize = currentArchiveSize + os.path.getsize(file)
+                            #If the list is now larger than the standard archive size, pack it up
+                            if currentArchiveSize > maximumArchiveSize:
+                                createArchive(archiveDstDir=workingDir,
+                                              manifestDir=manifestDir,
+                                              fileList=currentFileList,
+                                              printQueue=printQueue,
+                                              uploadQueues=uploadQueues,
+                                              archivePassword=archivePassword
+                                              )
+                                currentFileList.clear()
+                                currentArchiveSize = 0
                 
     #Spin off an archive for the remaining files
     if len(currentFileList) > 0:
