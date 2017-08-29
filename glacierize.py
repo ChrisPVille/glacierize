@@ -85,7 +85,7 @@ def uploadWorker(messageQueue, id, vaultName):
                 with open(curMessage[1], 'rb') as f:
                     response = client.initiate_multipart_upload(vaultName=vaultName,
                         archiveDescription=curMessage[2],
-                        partSize=str(268435456) #256MB
+                        partSize=str(min(268435456,os.path.getsize(curMessage[1]))) #256MB
                         )
                     uploadID = response.get('uploadId')
                     uploadMessageQueue.put(['UPDATE', 0, None])
@@ -104,7 +104,7 @@ def uploadWorker(messageQueue, id, vaultName):
                             )
                         prevTell = prevTell + len(buf)
                         uploadMessageQueue.put(['UPDATE', len(buf), None])
-              
+                        del buf
                     f.seek(0)
                     response = client.complete_multipart_upload(vaultName=vaultName,
                         uploadId=uploadID,
