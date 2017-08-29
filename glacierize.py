@@ -221,8 +221,8 @@ def archiveFolderRecursive(paths,workingDir,manifestDir,vaultName,archivePasswor
         for path in paths:
             for root, dirs, files in os.walk(path, topdown=False):
                 for file in files:
-                    if os.path.islink(file) == False:
-                        fullpath = os.path.abspath(os.path.join(root, file))
+                    fullpath = os.path.abspath(os.path.join(root, file))
+                    if os.path.islink(fullpath) == False:
                         totalSize += os.path.getsize(fullpath)
                         bigSetOFiles.add(fullpath)
                         fbar.update(1)
@@ -282,8 +282,8 @@ def archiveFolderRecursive(paths,workingDir,manifestDir,vaultName,archivePasswor
     for path in paths:
         for root, dirs, files in os.walk(path, topdown=False):
             for file in files:
+                file = os.path.abspath(os.path.join(root, file))
                 if os.path.islink(file) == False:
-                    file = os.path.abspath(os.path.join(root, file))
                     #We could just operate on the bigSetOFiles, but we lose the ordering
                     #so as a compromise, we just skip ones not in the set
                     if file in bigSetOFiles:                    
