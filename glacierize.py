@@ -113,8 +113,8 @@ def uploadWorker(messageQueue, id, vaultName):
                     with open(curMessage[3], 'a') as manifest:
                         manifest.write('----\n')
                         manifest.write(str(response.get('location')))
-                uploadMessageQueue.join()
                 uploadMessageQueue.put(['EXIT'])
+                uploadMessageQueue.join()
                 os.remove(curMessage[1]) #Delete the local copy of the file we just uploaded
                 uploadBarThread.join()
             messageQueue.task_done()
