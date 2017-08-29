@@ -76,6 +76,7 @@ def uploadWorker(messageQueue, id, vaultName):
             curMessage = messageQueue.get()
             curCommand = curMessage[0]
             if curCommand == 'EXIT':
+                messageQueue.task_done()
                 return
             elif curCommand == 'SEND':
                 uploadBarThread = threading.Thread(target=progressBarWorker, args=[uploadMessageQueue, os.path.getsize(curMessage[1]), id, "Upload Thread %d" % (int(id)-1)])
@@ -134,6 +135,7 @@ def progressBarWorker(messageQueue, totalSize, id, desc):
         curMessage = messageQueue.get()
         curCommand = curMessage[0]
         if curCommand == 'EXIT':
+            messageQueue.task_done()
             return
         elif curCommand == 'UPDATE':
             pbar.update(curMessage[1])
