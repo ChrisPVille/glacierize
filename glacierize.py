@@ -24,6 +24,7 @@ import uuid
 import hashlib
 import csv
 import threading
+import getpass
 
 from tqdm import tqdm
 from argparse import ArgumentParser
@@ -40,6 +41,7 @@ __date__ = '2017-08-22'
 __updated__ = '2017-08-22'
 
 DEBUG = 1
+terminateASAP = False
 
 class CLIError(Exception):
     '''Generic exception to raise and log different fatal errors.'''
@@ -65,55 +67,60 @@ class interceptingFileReader():
     def __getattr__(self, name):
         return getattr(self.file, name)
 
-def uploadWorker(messageQueue, id):
-    uploadMessageQueue = Queue()
-    client = boto3.client('glacier')
-    while True:
-        curMessage = messageQueue.get()
-        curCommand = curMessage[0]
-        if curCommand == 'EXIT':
-            return
-        elif curCommand == 'SEND':
-            uploadBarThread = threading.Thread(target=progressBarWorker, args=[uploadMessageQueue, os.path.getsize(curMessage[1]), id, "Upload Thread %d" % (int(id)-1)])
-            uploadBarThread.setDaemon(True)
-            uploadBarThread.start()
-            with open(curMessage[1], 'rb') as f:
-                response = client.initiate_multipart_upload(vaultName='test',
-                    archiveDescription=curMessage[2],
-                    partSize=str(268435456) #256MB
-                    )
-                uploadID = response.get('uploadId')
-                uploadMessageQueue.put(['UPDATE', 0, None])
-                
-                prevTell = 0
-                #interceptedF = interceptingFileReader(f, uploadMessageQueue)
-                while True:
-                    buf = f.read(268435456)
-                    if not buf: #eof
-                        break      
-                    response = client.upload_multipart_part(vaultName='test',
-                        uploadId=uploadID,
-                        #Thanks amazon...
-                        range='bytes %d-%d/*' % (prevTell, prevTell+len(buf)-1),
-                        body=buf
+def uploadWorker(messageQueue, id, vaultName):
+    global terminateASAP
+    try:
+        uploadMessageQueue = Queue()
+        client = boto3.client('glacier')
+        while True:
+            curMessage = messageQueue.get()
+            curCommand = curMessage[0]
+            if curCommand == 'EXIT':
+                return
+            elif curCommand == 'SEND':
+                uploadBarThread = threading.Thread(target=progressBarWorker, args=[uploadMessageQueue, os.path.getsize(curMessage[1]), id, "Upload Thread %d" % (int(id)-1)])
+                uploadBarThread.setDaemon(True)
+                uploadBarThread.start()
+                with open(curMessage[1], 'rb') as f:
+                    response = client.initiate_multipart_upload(vaultName=vaultName,
+                        archiveDescription=curMessage[2],
+                        partSize=str(268435456) #256MB
                         )
-                    prevTell = prevTell + len(buf)
-                    uploadMessageQueue.put(['UPDATE', len(buf), None])
-          
-                f.seek(0)
-                response = client.complete_multipart_upload(vaultName='test',
-                    uploadId=uploadID,
-                    archiveSize=str(os.path.getsize(curMessage[1])),
-                    checksum=calculate_tree_hash(f)
-                    )
-                with open(curMessage[3], 'a') as manifest:
-                    manifest.write('----\n')
-                    manifest.write(str(response.get('location')))
-            uploadMessageQueue.join()
-            uploadMessageQueue.put(['EXIT'])
-            os.remove(curMessage[1]) #Delete the local copy of the file we just uploaded
-            uploadBarThread.join()
-        messageQueue.task_done()
+                    uploadID = response.get('uploadId')
+                    uploadMessageQueue.put(['UPDATE', 0, None])
+                    
+                    prevTell = 0
+                    #interceptedF = interceptingFileReader(f, uploadMessageQueue)
+                    while True:
+                        buf = f.read(268435456)
+                        if not buf: #eof
+                            break      
+                        response = client.upload_multipart_part(vaultName=vaultName,
+                            uploadId=uploadID,
+                            #Thanks amazon...
+                            range='bytes %d-%d/*' % (prevTell, prevTell+len(buf)-1),
+                            body=buf
+                            )
+                        prevTell = prevTell + len(buf)
+                        uploadMessageQueue.put(['UPDATE', len(buf), None])
+              
+                    f.seek(0)
+                    response = client.complete_multipart_upload(vaultName=vaultName,
+                        uploadId=uploadID,
+                        archiveSize=str(os.path.getsize(curMessage[1])),
+                        checksum=calculate_tree_hash(f)
+                        )
+                    with open(curMessage[3], 'a') as manifest:
+                        manifest.write('----\n')
+                        manifest.write(str(response.get('location')))
+                uploadMessageQueue.join()
+                uploadMessageQueue.put(['EXIT'])
+                os.remove(curMessage[1]) #Delete the local copy of the file we just uploaded
+                uploadBarThread.join()
+            messageQueue.task_done()
+    except Exception as e:
+        terminateASAP = True
+        raise e
 
             
 def progressBarWorker(messageQueue, totalSize, id, desc):
@@ -147,6 +154,7 @@ def md5OfFile(fileName):
     return runningHash.hexdigest()
     
 def createArchive(archiveDstDir,manifestDir,fileList,printQueue,uploadQueues,archivePassword):
+    global terminateASAP
     archiveUUID = uuid.uuid1()
     tarName = os.path.join(archiveDstDir,str(archiveUUID)+'.tar.gz')
     tar = tarfile.open(tarName, 'x:gz')
@@ -166,6 +174,10 @@ def createArchive(archiveDstDir,manifestDir,fileList,printQueue,uploadQueues,arc
         
         printQueue.put(['UPDATE', os.path.getsize(fileName)])
 
+        #Stay apprised of the state of the program
+        if terminateASAP == True:
+            raise Exception('A child thread has terminated abnormally')
+        
     manifest.close()
     tar.close()
     printQueue.put(['STATUS', 'ENCRYPT.'])
@@ -202,45 +214,51 @@ def createArchive(archiveDstDir,manifestDir,fileList,printQueue,uploadQueues,arc
             sleep(0.1)
                             
 
-def archiveFolderRecursive(paths,workingDir,manifestDir,archivePassword):
+def archiveFolderRecursive(paths,workingDir,manifestDir,vaultName,archivePassword):
     bigSetOFiles = set()
     totalSize = 0
-    with tqdm(desc='Enumerating folders', unit='dir', dynamic_ncols=True) as fbar:
+    with tqdm(desc='Enumerating files', unit='f', dynamic_ncols=True) as fbar:
         for path in paths:
             for root, dirs, files in os.walk(path, topdown=False):
                 for file in files:
                     fullpath = os.path.abspath(os.path.join(root, file))
-                    totalSize += os.stat(fullpath).st_size
+                    totalSize += os.path.getsize(fullpath)
                     bigSetOFiles.add(fullpath)
                     fbar.update(1)
     
 
-    with tqdm(desc='Computing changes', unit='f', dynamic_ncols=True, total=len(bigSetOFiles)) as fbar:
-        manifestFiles = [os.path.join(manifestDir,fn) for fn in next(os.walk(manifestDir))[2] if fn.endswith('.manifest')]
-        for manifestFilePath in manifestFiles:
-            with open(manifestFilePath, newline='') as manifestFile:
-                manifestFileCSV = csv.reader(manifestFile, delimiter=',')
-                next(manifestFileCSV)
-                setOfItemsToRemove = set()
-                sizeToRemoveFromTotal = 0
-                for row in manifestFileCSV:
-                    if len(row) == 1 and row[0] == '----':
-                        #This manifest is valid, commit the differences
-                        bigSetOFiles.difference_update(setOfItemsToRemove)
-                        totalSize -= sizeToRemoveFromTotal
-                        break
-                    #If the file in the manifest exists
-                    if row[0] in bigSetOFiles:
-                        fbar.update(1)
-                        #Is it the same size?
-                        if os.path.getsize(row[0]) == int(row[1]):
-                            #Same hash?
-                            if str(md5OfFile(row[0])) == row[3]:
-                                #If so, don't backup the file
-                                setOfItemsToRemove.add(row[0])
-                                sizeToRemoveFromTotal += os.path.getsize(row[0])
+    with tqdm(desc='Evaluating manifest entries', unit='f', dynamic_ncols=True, position=0) as ebar:
+        with tqdm(desc='Unchanged files', unit='f', dynamic_ncols=True, position=1) as fbar:
+            manifestFiles = [os.path.join(manifestDir,fn) for fn in next(os.walk(manifestDir))[2] if fn.endswith('.manifest')]
+            for manifestFilePath in manifestFiles:
+                with open(manifestFilePath, newline='') as manifestFile:
+                    manifestFileCSV = csv.reader(manifestFile, delimiter=',')
+                    next(manifestFileCSV)
+                    setOfItemsToRemove = set()
+                    sizeToRemoveFromTotal = 0
+                    validManifest = False
+                    for row in manifestFileCSV:
+                        if len(row) == 1 and row[0] == '----':
+                            #This manifest is valid, commit the differences
+                            validManifest = True
+                            bigSetOFiles.difference_update(setOfItemsToRemove)
+                            totalSize -= sizeToRemoveFromTotal
+                            fbar.update(len(setOfItemsToRemove))
+                            break
+                        #If the file in the manifest exists
+                        if row[0] in bigSetOFiles:
+                            ebar.update(1)
+                            #Is it the same size?
+                            if os.path.getsize(row[0]) == int(row[1]):
+                                #Same hash?
+                                if str(md5OfFile(row[0])) == row[3]:
+                                    #If so, don't backup the file
+                                    setOfItemsToRemove.add(row[0])
+                                    sizeToRemoveFromTotal += os.path.getsize(row[0])
+                    if validManifest == False:
+                        print('\nManifest %s is invalid' % os.path.basename(manifestFilePath))
     
-    print('Done, creating archive...')
+    print('\nDone, creating archive...')
 
     printQueue = Queue() 
     printThread = threading.Thread(target=progressBarWorker, args=[printQueue, totalSize, 0, 'Total Progress'])
@@ -251,7 +269,7 @@ def archiveFolderRecursive(paths,workingDir,manifestDir,archivePassword):
     uploadThreads = []
     for threadNo in range(2):
         uploadQueues.append(Queue(maxsize=1))
-        uploadThreads.append(threading.Thread(target=uploadWorker, args=[uploadQueues[threadNo], threadNo+1]))
+        uploadThreads.append(threading.Thread(target=uploadWorker, args=[uploadQueues[threadNo], threadNo+1, vaultName]))
         uploadThreads[threadNo].setDaemon(True)
         uploadThreads[threadNo].start()
     
@@ -260,7 +278,6 @@ def archiveFolderRecursive(paths,workingDir,manifestDir,archivePassword):
     currentFileList = []
     maximumArchiveSize = 1*1024*1024*1024 #1GB
     
-    print(bigSetOFiles)
     for path in paths:
         for root, dirs, files in os.walk(path, topdown=False):
             for file in files:
@@ -270,26 +287,44 @@ def archiveFolderRecursive(paths,workingDir,manifestDir,archivePassword):
                 if file in bigSetOFiles:                    
                     #If the current file is larger than the standard archive size, make one just for it
                     if os.path.getsize(file) > maximumArchiveSize:
-                        createArchive(workingDir,manifestDir,[file],printQueue,uploadQueues,archivePassword)
+                        createArchive(archiveDstDir=workingDir,
+                                      manifestDir=manifestDir,
+                                      fileList=[file],
+                                      printQueue=printQueue,
+                                      uploadQueues=uploadQueues,
+                                      archivePassword=archivePassword
+                                      )
                     else: #Otherwise, add it to the list
                         currentFileList.append(file)
                         currentArchiveSize = currentArchiveSize + os.path.getsize(file)
                         #If the list is now larger than the standard archive size, pack it up
                         if currentArchiveSize > maximumArchiveSize:
-                            createArchive(workingDir,manifestDir,currentFileList,printQueue,uploadQueues,archivePassword)
+                            createArchive(archiveDstDir=workingDir,
+                                          manifestDir=manifestDir,
+                                          fileList=currentFileList,
+                                          printQueue=printQueue,
+                                          uploadQueues=uploadQueues,
+                                          archivePassword=archivePassword
+                                          )
                             currentFileList.clear()
                             currentArchiveSize = 0
                 
     #Spin off an archive for the remaining files
     if len(currentFileList) > 0:
-        createArchive(workingDir,manifestDir,currentFileList,printQueue,uploadQueues,archivePassword)
+        createArchive(archiveDstDir=workingDir,
+                      manifestDir=manifestDir,
+                      fileList=currentFileList,
+                      printQueue=printQueue,
+                      uploadQueues=uploadQueues,
+                      archivePassword=archivePassword
+                      )
     
-    printQueue.put(['STATUS', 'DONE....'])
-    printQueue.put(['EXIT'])
-    printThread.join(5)
     for threadNo in range(2):
         uploadQueues[threadNo].put(['EXIT'])
         uploadThreads[threadNo].join()
+    printQueue.put(['STATUS', 'DONE....'])
+    printQueue.put(['EXIT'])
+    printThread.join(5)
     
 def main(argv=None): # IGNORE:C0111
     '''Command line options.'''
@@ -329,6 +364,7 @@ USAGE
         parser = ArgumentParser(description=program_license, formatter_class=RawDescriptionHelpFormatter)
         parser.add_argument('-t', dest='tempdir', metavar='path', nargs='?', help='Temporary directory for the archive files')
         parser.add_argument('-m', dest='manifestdir', metavar='path', required=True, help='Directory for the manifest files. Any manifests already present will be compared against, allow for incremental backup.')
+        parser.add_argument('-n', dest='vaultname', metavar='vault', required=True, help='Name of destination glacier vault')
         parser.add_argument('-V', '--version', action='version', version=program_version_message)
         parser.add_argument(dest="paths", help="paths to folder(s) to recursively backup [default: %(default)s]", metavar="path", nargs='+')
 
@@ -338,9 +374,17 @@ USAGE
         paths = args.paths
         tempDir = args.tempdir
         manifestDir = args.manifestdir
+        vaultName = args.vaultname
         
         if tempDir == None:
             tempDir = mkdtemp()
+        
+        pw1 = getpass.getpass('Desired encryption password:')
+        pw2 = getpass.getpass('Retype:')
+        
+        if pw1 != pw2:
+            print('Passwords do not match')
+            raise Exception("Input password mismatch")
         
         #This will build archives relative to the path here
         #For example, if you provide a full path to a folder
@@ -348,7 +392,13 @@ USAGE
         #the full paths /home/foo/file1, /home/foo/file2, 
         #etc. inside. Relative paths are usually the way
         #to go here
-        archiveFolderRecursive(paths,tempDir,manifestDir,'1234')
+        archiveFolderRecursive(paths=paths,
+                               workingDir=tempDir,
+                               manifestDir=manifestDir,
+                               vaultName=vaultName,
+                               archivePassword=pw1
+                               )
+        print('\nAll Operations Complete')
             
         return 0
     except KeyboardInterrupt:
