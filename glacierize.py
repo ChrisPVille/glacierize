@@ -71,7 +71,6 @@ def uploadWorker(messageQueue, id, vaultName):
     global terminateASAP
     try:
         uploadMessageQueue = Queue()
-        client = boto3.client('glacier')
         while True:
             curMessage = messageQueue.get()
             curCommand = curMessage[0]
@@ -83,34 +82,40 @@ def uploadWorker(messageQueue, id, vaultName):
                 uploadBarThread.setDaemon(True)
                 uploadBarThread.start()
                 with open(curMessage[1], 'rb') as f:
+                    client = boto3.client('glacier')
                     response = client.initiate_multipart_upload(vaultName=vaultName,
                         archiveDescription=curMessage[2],
-                        partSize=str(min(268435456,os.path.getsize(curMessage[1]))) #256MB
+                        partSize=str(2**28) #256MB
                         )
+                    del client
                     uploadID = response.get('uploadId')
                     uploadMessageQueue.put(['UPDATE', 0, None])
                     
                     prevTell = 0
                     #interceptedF = interceptingFileReader(f, uploadMessageQueue)
                     while True:
-                        buf = f.read(268435456)
+                        buf = f.read(2**28)
                         if not buf: #eof
                             break      
+                        client = boto3.client('glacier')
                         response = client.upload_multipart_part(vaultName=vaultName,
                             uploadId=uploadID,
                             #Thanks amazon...
                             range='bytes %d-%d/*' % (prevTell, prevTell+len(buf)-1),
                             body=buf
                             )
+                        del client
                         prevTell = prevTell + len(buf)
                         uploadMessageQueue.put(['UPDATE', len(buf), None])
                         del buf
                     f.seek(0)
+                    client = boto3.client('glacier')
                     response = client.complete_multipart_upload(vaultName=vaultName,
                         uploadId=uploadID,
                         archiveSize=str(os.path.getsize(curMessage[1])),
                         checksum=calculate_tree_hash(f)
                         )
+                    del client
                     with open(curMessage[3], 'a') as manifest:
                         manifest.write('----\n')
                         manifest.write(str(response.get('location')))
