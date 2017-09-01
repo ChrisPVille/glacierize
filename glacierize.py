@@ -25,11 +25,12 @@ import hashlib
 import csv
 import threading
 import getpass
+import queue
+import multiprocessing
 
 from tqdm import tqdm
 from argparse import ArgumentParser
 from argparse import RawDescriptionHelpFormatter
-from queue import Queue, Empty, Full
 from time import sleep
 from subprocess import Popen, PIPE
 from tempfile import mkdtemp
@@ -41,7 +42,8 @@ __date__ = '2017-08-22'
 __updated__ = '2017-08-22'
 
 DEBUG = 1
-terminateASAP = False
+numberOfTasksQueuedLock = threading.Lock()
+numberOfTasksQueued = 0 #TODO make member variable
 
 class CLIError(Exception):
     '''Generic exception to raise and log different fatal errors.'''
@@ -67,67 +69,70 @@ class interceptingFileReader():
     def __getattr__(self, name):
         return getattr(self.file, name)
 
-def uploadWorker(messageQueue, id, vaultName):
-    global terminateASAP
+def uploadWorker(file, chunkSize, desc, vaultName, manifestFile, uploadStatusQueue):
+    #ourUUID = uuid.uuid1() #used for unique identification of this process for status reporting
+    session = boto3.session.Session()
     try:
-        uploadMessageQueue = Queue()
-        while True:
-            curMessage = messageQueue.get()
-            curCommand = curMessage[0]
-            if curCommand == 'EXIT':
-                messageQueue.task_done()
-                return
-            elif curCommand == 'SEND':
-                uploadBarThread = threading.Thread(target=progressBarWorker, args=[uploadMessageQueue, os.path.getsize(curMessage[1]), id, "Upload Thread %d" % (int(id)-1)])
-                uploadBarThread.setDaemon(True)
-                uploadBarThread.start()
-                with open(curMessage[1], 'rb') as f:
-                    client = boto3.client('glacier')
-                    response = client.initiate_multipart_upload(vaultName=vaultName,
-                        archiveDescription=curMessage[2],
-                        partSize=str(2**28) #256MB
-                        )
-                    del client
-                    uploadID = response.get('uploadId')
-                    uploadMessageQueue.put(['UPDATE', 0, None])
-                    
-                    prevTell = 0
-                    #interceptedF = interceptingFileReader(f, uploadMessageQueue)
-                    while True:
-                        buf = f.read(2**28)
-                        if not buf: #eof
-                            break      
-                        client = boto3.client('glacier')
-                        response = client.upload_multipart_part(vaultName=vaultName,
-                            uploadId=uploadID,
-                            #Thanks amazon...
-                            range='bytes %d-%d/*' % (prevTell, prevTell+len(buf)-1),
-                            body=buf
-                            )
-                        del client
-                        prevTell = prevTell + len(buf)
-                        uploadMessageQueue.put(['UPDATE', len(buf), None])
-                        del buf
-                    f.seek(0)
-                    client = boto3.client('glacier')
-                    response = client.complete_multipart_upload(vaultName=vaultName,
-                        uploadId=uploadID,
-                        archiveSize=str(os.path.getsize(curMessage[1])),
-                        checksum=calculate_tree_hash(f)
-                        )
-                    del client
-                    with open(curMessage[3], 'a') as manifest:
-                        manifest.write('----\n')
-                        manifest.write(str(response.get('location')))
-                uploadMessageQueue.put(['EXIT'])
-                uploadMessageQueue.join()
-                os.remove(curMessage[1]) #Delete the local copy of the file we just uploaded
-                uploadBarThread.join()
-            messageQueue.task_done()
-    except Exception as e:
-        terminateASAP = True
-        raise e
+        f = open(file, 'rb')
 
+        #boto3 client holds onto buffers some dumb reason, so we make a new one
+        #every call. Also it appears to have some thread safety issues, so we
+        #use multiprocess
+
+        response = session.client('glacier').initiate_multipart_upload(
+            vaultName=vaultName,
+            archiveDescription=desc,
+            partSize=str(chunkSize))
+
+        uploadID = response.get('uploadId')
+        del response
+        #uploadStatusQueue.put(['START', ourUUID, None])
+
+        prevTell = 0
+        #interceptedF = interceptingFileReader(f, uploadMessageQueue)
+        while True:
+            buf = f.read(chunkSize)
+            if not buf: #eof
+                break
+
+            session.client('glacier').upload_multipart_part(
+                vaultName=vaultName,
+                uploadId=uploadID,
+                #Thanks amazon...
+                range='bytes %d-%d/*' % (prevTell, prevTell+len(buf)-1),
+                body=buf)
+            prevTell = prevTell + len(buf)
+            del buf
+            #uploadStatusQueue.put(['UPDATE', ourUUID, len(buf), None])
+
+        f.seek(0)
+
+        response = session.client('glacier').complete_multipart_upload(vaultName=vaultName,
+            uploadId=uploadID,
+            archiveSize=str(os.path.getsize(file)),
+            checksum=calculate_tree_hash(f)
+            )
+
+        f.close()
+
+        mF = open(manifestFile, 'a')
+        mF.write('----\n')
+        mF.write(str(response.get('location')))
+        mF.close()
+        del response
+
+        #uploadStatusQueue.put(['DONE', ourUUID])
+        os.remove(file) #Delete the local copy of the file we just uploaded
+
+    except Exception as e:
+        os.remove(file)
+        os.remove(manifestFile)
+
+        #It looks like amazon has non-picklable exceptions... sigh
+        #if hasattr(e, 'message'):
+            #uploadStatusQueue.put(['DIE', ourUUID, e.message])
+        #else:
+            #uploadStatusQueue.put(['DIE', ourUUID])
             
 def progressBarWorker(messageQueue, totalSize, id, desc):
     pbar = tqdm(total=totalSize, unit='B', unit_scale=True, dynamic_ncols=True, desc=desc, position=id, smoothing=0)
@@ -160,8 +165,12 @@ def md5OfFile(fileName):
             runningHash.update( buf )
     return runningHash.hexdigest()
     
-def createArchive(archiveDstDir,manifestDir,fileList,printQueue,uploadQueues,archivePassword):
-    global terminateASAP
+def archiveUploadedCallback(x):
+    global numberOfTasksQueued
+    with numberOfTasksQueuedLock:
+        numberOfTasksQueued -= 1
+
+def createArchive(archiveDstDir,manifestDir,fileList,printQueue,uploadPool,archivePassword,vaultName):
     archiveUUID = uuid.uuid1()
     tarName = os.path.join(archiveDstDir,str(archiveUUID)+'.tar.gz')
     tar = tarfile.open(tarName, 'x:gz')
@@ -180,10 +189,6 @@ def createArchive(archiveDstDir,manifestDir,fileList,printQueue,uploadQueues,arc
         manifestCsv.writerow([fileName, os.path.getsize(fileName), os.path.getmtime(fileName), str(fileHash)])
         
         printQueue.put(['UPDATE', os.path.getsize(fileName)])
-
-        #Stay apprised of the state of the program
-        if terminateASAP == True:
-            raise Exception('A child thread has terminated abnormally')
         
     manifest.close()
     tar.close()
@@ -207,19 +212,14 @@ def createArchive(archiveDstDir,manifestDir,fileList,printQueue,uploadQueues,arc
     os.remove(tarName)
     
     printQueue.put(['STATUS', 'UPLOAD..'])
-    emplaceSuccessful = False
-    while emplaceSuccessful == False:
-        for uploadQueue in uploadQueues:
-            try:
-                uploadQueue.put_nowait(['SEND', encName, str(archiveUUID), manifestName])
-                emplaceSuccessful = True
-                break
-            except Full:
-                continue
-        #If there is no free upload queue, wait for the first one
-        if emplaceSuccessful == False:
+
+    global numberOfTasksQueued
+    with numberOfTasksQueuedLock:
+        if numberOfTasksQueued <= 4:
+            numberOfTasksQueued += 1
+            uploadPool.apply_async(uploadWorker, callback=archiveUploadedCallback, args=[encName, 2**28, str(archiveUUID), vaultName, manifestName, None])
+        else:
             sleep(0.1)
-                            
 
 def archiveFolderRecursive(paths,workingDir,manifestDir,vaultName,archivePassword,hashTiebreaker):
     bigSetOFiles = set()
@@ -273,23 +273,17 @@ def archiveFolderRecursive(paths,workingDir,manifestDir,vaultName,archivePasswor
     
     print('\nDone, creating archive...')
 
-    printQueue = Queue() 
+    printQueue = queue.Queue()
     printThread = threading.Thread(target=progressBarWorker, args=[printQueue, totalSize, 0, 'Total Progress'])
     printThread.setDaemon(True)
     printThread.start()
     
-    uploadQueues = []
-    uploadThreads = []
-    for threadNo in range(2):
-        uploadQueues.append(Queue(maxsize=1))
-        uploadThreads.append(threading.Thread(target=uploadWorker, args=[uploadQueues[threadNo], threadNo+1, vaultName]))
-        uploadThreads[threadNo].setDaemon(True)
-        uploadThreads[threadNo].start()
-    
+    numUploadWorkers = 4
+    uploadPool = multiprocessing.Pool(numUploadWorkers)
 
     currentArchiveSize = 0
     currentFileList = []
-    maximumArchiveSize = 1*1024*1024*1024 #1GB
+    maximumArchiveSize = 2**30 #1GB
     
     for path in paths:
         for root, dirs, files in os.walk(path, topdown=False):
@@ -305,9 +299,9 @@ def archiveFolderRecursive(paths,workingDir,manifestDir,vaultName,archivePasswor
                                           manifestDir=manifestDir,
                                           fileList=[file],
                                           printQueue=printQueue,
-                                          uploadQueues=uploadQueues,
-                                          archivePassword=archivePassword
-                                          )
+                                          uploadPool=uploadPool,
+                                          archivePassword=archivePassword,
+                                          vaultName=vaultName)
                         else: #Otherwise, add it to the list
                             currentFileList.append(file)
                             currentArchiveSize = currentArchiveSize + os.path.getsize(file)
@@ -317,9 +311,9 @@ def archiveFolderRecursive(paths,workingDir,manifestDir,vaultName,archivePasswor
                                               manifestDir=manifestDir,
                                               fileList=currentFileList,
                                               printQueue=printQueue,
-                                              uploadQueues=uploadQueues,
-                                              archivePassword=archivePassword
-                                              )
+                                              uploadPool=uploadPool,
+                                              archivePassword=archivePassword,
+                                              vaultName=vaultName)
                                 currentFileList.clear()
                                 currentArchiveSize = 0
                 
@@ -329,13 +323,13 @@ def archiveFolderRecursive(paths,workingDir,manifestDir,vaultName,archivePasswor
                       manifestDir=manifestDir,
                       fileList=currentFileList,
                       printQueue=printQueue,
-                      uploadQueues=uploadQueues,
-                      archivePassword=archivePassword
-                      )
+                      uploadPool=uploadPool,
+                      archivePassword=archivePassword,
+                      vaultName=vaultName)
+
+    uploadPool.close()
+    uploadPool.join()
     
-    for threadNo in range(2):
-        uploadQueues[threadNo].put(['EXIT'])
-        uploadThreads[threadNo].join()
     printQueue.put(['STATUS', 'DONE....'])
     printQueue.put(['EXIT'])
     printThread.join(5)
