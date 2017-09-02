@@ -30,7 +30,6 @@ import queue
 import multiprocessing
 import gc
 
-from memory_profiler import profile
 from tqdm import tqdm
 from argparse import ArgumentParser
 from argparse import RawDescriptionHelpFormatter
@@ -72,7 +71,6 @@ class interceptingFileReader():
     def __getattr__(self, name):
         return getattr(self.file, name)
 
-@profile
 def uploadFile(file, chunkSize, desc, vaultName, manifestFile, uploadStatusQueue):
     #ourUUID = uuid.uuid1() #used for unique identification of this process for status reporting
     retryCount = 0
