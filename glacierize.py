@@ -182,7 +182,7 @@ def archiveUploadedCallback(x):
     with numberOfTasksQueuedLock:
         numberOfTasksQueued -= 1
 
-def createArchiveWorker(archiveDstDir,manifestDir,fileList,printQueue,archivePassword,vaultName):
+def createArchiveWorker(archiveDstDir,manifestDir,fileTuple,printQueue,archivePassword,vaultName):
     archiveUUID = uuid.uuid1()
     tarName = os.path.join(archiveDstDir,str(archiveUUID)+'.tar.gz')
     tar = tarfile.open(tarName, 'x:gz')
@@ -191,7 +191,7 @@ def createArchiveWorker(archiveDstDir,manifestDir,fileList,printQueue,archivePas
     manifest = open(manifestName, 'w')
     manifestCsv = csv.writer(manifest, delimiter=',', quoting=csv.QUOTE_MINIMAL)
     manifestCsv.writerow(['Name','Size','MTime','MD5Sum'])
-    for fileName in fileList:
+    for fileName in fileTuple:
         #printQueue.put(['STATUS', 'HASH....'])
         fileHash = md5OfFile(fileName)
         
@@ -242,7 +242,7 @@ def createArchive(archiveDstDir,manifestDir,fileList,printQueue,archivePassword,
         if numberOfTasksQueued <= maxQueuedTasks:
             numberOfTasksQueued += 1
             numberOfTasksQueuedLock.release()
-            uploadPool.apply_async(createArchiveWorker, callback=archiveUploadedCallback, args=[archiveDstDir, manifestDir, fileList, printQueue, archivePassword, vaultName])
+            uploadPool.apply_async(createArchiveWorker, callback=archiveUploadedCallback, args=(archiveDstDir, manifestDir, tuple(fileList), printQueue, archivePassword, vaultName))
             return
         else:
             numberOfTasksQueuedLock.release()
